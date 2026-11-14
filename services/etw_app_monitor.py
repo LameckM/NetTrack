@@ -1,7 +1,8 @@
 """Real-time ETW-backed application traffic monitor for Windows.
 
-ETW is used as the sole source for this monitor. Do not add these event-byte
-totals to TCP EStats totals, because that would double-count the same traffic.
+Raw Kernel-Network events are decoded selectively (PID and size only) to
+avoid pywintrace's expensive full payload decoding. ETW is the sole source for
+this monitor; do not add these totals to TCP EStats totals.
 """
 import ctypes
 import os
@@ -13,6 +14,10 @@ from services.etw_event_accounting import (
     RECEIVE_EVENT_IDS,
     SEND_EVENT_IDS,
     ETWTrafficCounter,
+)
+from services.etw_raw_decoder import (
+    RawKernelNetworkEventDecoder,
+    create_provider_parameters,
 )
 
 PROVIDER_GUID = "{7DD42A49-5329-4832-8DFD-43D979153A88}"
@@ -31,12 +36,23 @@ def is_admin():
 class ETWAppMonitor:
     """Collect per-process network event bytes from a real-time ETW session."""
 
-    def __init__(self, session_name=None, etw_module=None, stop_timeout=10.0):
+    def __init__(
+        self,
+        session_name=None,
+        etw_module=None,
+        stop_timeout=10.0,
+        raw_decoder=None,
+        raw_callback_data_flag=None,
+        provider_parameters=None,
+    ):
         if stop_timeout <= 0:
             raise ValueError("ETW stop timeout must be greater than zero.")
         self.stop_timeout = stop_timeout
         self.session_name = session_name or f"NetTrackAppUsage_{os.getpid()}"
         self._etw_module = etw_module
+        self._raw_decoder = raw_decoder
+        self._raw_callback_data_flag = raw_callback_data_flag
+        self._provider_parameters = provider_parameters
         self._counter = ETWTrafficCounter()
         self._session = None
         self._started = False
@@ -60,14 +76,46 @@ class ETWAppMonitor:
         self._etw_module = etw
         return etw
 
-    def _on_event(self, event):
-        """Keep the ETW callback small; resolve process metadata when sampled."""
+    def _load_raw_components(self):
+        """Load pywintrace's raw callback mode and selective TDH decoder."""
+        if (
+            self._raw_decoder is not None
+            and self._raw_callback_data_flag is not None
+            and self._provider_parameters is not None
+        ):
+            return
+
         try:
-            event_id, payload = event
-            self._counter.record(event_id, payload)
+            import etw.etw as etw_impl
+            from etw import tdh
+            from etw.common import RETURN_RAW_UNFORMATTED_DATA
+        except ImportError as exc:
+            raise RuntimeError(
+                "The installed pywintrace package does not expose the "
+                "required raw ETW callback interfaces."
+            ) from exc
+
+        if self._raw_decoder is None:
+            self._raw_decoder = RawKernelNetworkEventDecoder(etw_impl, tdh)
+        if self._raw_callback_data_flag is None:
+            self._raw_callback_data_flag = RETURN_RAW_UNFORMATTED_DATA
+        if self._provider_parameters is None:
+            self._provider_parameters = create_provider_parameters(etw_impl)
+
+    def _on_event(self, event):
+        """Extract PID/size from raw records, then update the thread-safe counter."""
+        try:
+            _callback_event_id, record = event
+            event_id = int(
+                record.contents.EventHeader.EventDescriptor.Id
+            )
+            payload = self._raw_decoder.decode(record, event_id)
+            if payload is not None:
+                self._counter.record(event_id, payload)
         except Exception as exc:
             with self._lock:
-                self.callback_errors.append(repr(exc))
+                if len(self.callback_errors) < 20:
+                    self.callback_errors.append(repr(exc))
 
     def start(self):
         if os.name != "nt":
@@ -80,17 +128,19 @@ class ETWAppMonitor:
             return
 
         etw = self._load_etw()
+        self._load_raw_components()
         provider = etw.ProviderInfo(
             "Microsoft-Windows-Kernel-Network",
             etw.GUID(PROVIDER_GUID),
             level=TRACE_LEVEL,
             any_keywords=KEYWORDS_IPV4_IPV6,
+            params=self._provider_parameters.get(),
         )
         session = etw.ETW(
             session_name=self.session_name,
             providers=[provider],
             event_callback=self._on_event,
-            event_id_filters=sorted(SEND_EVENT_IDS | RECEIVE_EVENT_IDS),
+            callback_data_flag=self._raw_callback_data_flag,
         )
         session.start()
         self._session = session
@@ -121,13 +171,9 @@ class ETWAppMonitor:
             previous = self._previous.get(pid)
 
             if previous is None:
-                # First observation includes all events recorded since the
-                # ETW session began.
                 sent = current_sent
                 received = current_received
             elif previous[0] != process_created:
-                # PID was reused. Do not attribute the previous process's
-                # accumulated ETW events to the new process instance.
                 sent = 0
                 received = 0
             else:
@@ -166,14 +212,13 @@ class ETWAppMonitor:
         self._started = False
         if session is not None:
             # pywintrace's consumer.stop() performs an unbounded thread.join().
-            # Run shutdown in a daemon helper so Ctrl+C cannot leave the main
-            # service blocked forever while waiting for ProcessTrace to exit.
+            # Keep the service's main thread responsive if the consumer stalls.
             errors = []
 
             def stop_session():
                 try:
                     session.stop()
-                except Exception as exc:  # propagate on the caller thread
+                except Exception as exc:
                     errors.append(exc)
 
             shutdown_thread = threading.Thread(
@@ -188,4 +233,3 @@ class ETWAppMonitor:
             if errors:
                 raise errors[0]
         return True
-
