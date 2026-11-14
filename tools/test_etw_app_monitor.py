@@ -194,6 +194,9 @@ class ETWAppMonitorTests(unittest.TestCase):
             session_name="NetTrackSlowStopTest",
             etw_module=SlowStopETWModule(),
             stop_timeout=0.02,
+            raw_decoder=FakeRawDecoder(),
+            raw_callback_data_flag="RAW_MODE",
+            provider_parameters=FakeProviderParameters(),
         )
         with patch("services.etw_app_monitor.os.name", "nt"), patch(
             "services.etw_app_monitor.is_admin", return_value=True
