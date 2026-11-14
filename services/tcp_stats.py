@@ -470,30 +470,39 @@ class TCPStatsMonitor:
         count = ctypes.cast(
             buffer, ctypes.POINTER(wintypes.DWORD)
         ).contents.value
-        rows_type = TCP6Row * count
-        rows = ctypes.cast(
-            ctypes.addressof(buffer) + ctypes.sizeof(wintypes.DWORD),
-            ctypes.POINTER(rows_type),
-        ).contents
 
         wanted_local = socket.inet_pton(socket.AF_INET6, connection["local_ip"])
         wanted_remote = socket.inet_pton(socket.AF_INET6, connection["remote_ip"])
 
-        for row in rows:
-            if (
-                bytes(row.local_addr) == wanted_local
-                and bytes(row.remote_addr) == wanted_remote
-                and row.local_scope_id == connection["local_scope_id"]
-                and row.remote_scope_id == connection["remote_scope_id"]
-                and socket.ntohs(row.local_port & 0xFFFF) == connection["local_port"]
-                and socket.ntohs(row.remote_port & 0xFFFF) == connection["remote_port"]
-                and row.state == connection["state"]
-            ):
-                # ctypes returns a structure by value; this is an owned copy,
-                # not a pointer into the temporary table buffer.
-                return TCP6Row.from_buffer_copy(bytes(row))
+        # Microsoft documents that MIB_TCP6TABLE may include padding after
+        # dwNumEntries. Try the documented DWORD boundary and the 8-byte
+        # aligned boundary, accepting only a row matching the full tuple.
+        offsets = (ctypes.sizeof(wintypes.DWORD), 8)
+        for offset in offsets:
+            required_size = offset + count * ctypes.sizeof(TCP6Row)
+            if required_size > size.value:
+                continue
+
+            rows_type = TCP6Row * count
+            rows = ctypes.cast(
+                ctypes.addressof(buffer) + offset,
+                ctypes.POINTER(rows_type),
+            ).contents
+
+            for row in rows:
+                if (
+                    bytes(row.local_addr) == wanted_local
+                    and bytes(row.remote_addr) == wanted_remote
+                    and row.local_scope_id == connection["local_scope_id"]
+                    and row.remote_scope_id == connection["remote_scope_id"]
+                    and socket.ntohs(row.local_port & 0xFFFF) == connection["local_port"]
+                    and socket.ntohs(row.remote_port & 0xFFFF) == connection["remote_port"]
+                    and row.state == connection["state"]
+                ):
+                    return TCP6Row.from_buffer_copy(bytes(row))
 
         raise RuntimeError(
             "IPv6 connection from GetExtendedTcpTable was not found "
-            "in GetTcp6Table; the connection may have closed or changed"
+            "in GetTcp6Table at either supported table-row alignment; "
+            "the connection may have closed or changed"
         )
