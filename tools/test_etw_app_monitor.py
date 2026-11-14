@@ -132,6 +132,31 @@ class ETWAppMonitorTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.monitor.collect_once()
 
+    def test_stop_returns_false_when_pywintrace_shutdown_times_out(self):
+        import time
+
+        class SlowStopSession(FakeSession):
+            def stop(self):
+                time.sleep(0.15)
+                self.stopped = True
+
+        class SlowStopETWModule(FakeETWModule):
+            def ETW(self, **kwargs):
+                self.session = SlowStopSession(**kwargs)
+                return self.session
+
+        monitor = ETWAppMonitor(
+            session_name="NetTrackSlowStopTest",
+            etw_module=SlowStopETWModule(),
+            stop_timeout=0.02,
+        )
+        with patch("services.etw_app_monitor.os.name", "nt"), patch(
+            "services.etw_app_monitor.is_admin", return_value=True
+        ):
+            monitor.start()
+        self.assertFalse(monitor.stop())
+        self.assertFalse(monitor._started)
+
     def test_stop_is_safe_before_start_and_idempotent(self):
         self.monitor.stop()
         self.start_monitor()
