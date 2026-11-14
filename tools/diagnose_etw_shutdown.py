@@ -9,6 +9,7 @@ import os
 import sys
 import threading
 import time
+import traceback
 from pathlib import Path
 
 # Make the repository root importable when this file is run directly.
@@ -109,7 +110,20 @@ def main():
         )
         print(f"Consumer end_capture set: {consumer.end_capture.is_set()}", flush=True)
         print(f"Consumer stop error: {result['error']}", flush=True)
-        print("\nRESULT: inspect the two stop stages above.", flush=True)
+        print("\nCONSUMER THREAD STACK:", flush=True)
+        frames = sys._current_frames()
+        consumer_ident = consumer.process_thread.ident
+        if consumer_ident in frames:
+            print("".join(traceback.format_stack(frames[consumer_ident])), flush=True)
+        else:
+            print("No Python frame found for consumer thread.", flush=True)
+        print("\nSTOP HELPER THREAD STACK:", flush=True)
+        shutdown_ident = shutdown.ident
+        if shutdown_ident in frames:
+            print("".join(traceback.format_stack(frames[shutdown_ident])), flush=True)
+        else:
+            print("No Python frame found for stop helper thread.", flush=True)
+        print("\nRESULT: inspect the thread stacks above.", flush=True)
     finally:
         etw_impl.et.CloseTrace = original_close_trace
 
