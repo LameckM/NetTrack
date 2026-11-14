@@ -1,11 +1,11 @@
-"""Inspect Windows TCP owner-PID tables while a child makes HTTPS traffic.
+"""Compare NetTrack's TCP table parser with Windows netstat for a live child socket.
 
 Run:
     python tools/diagnose_tcp_owner_table.py
 
-This diagnostic prints all ESTABLISHED TCP connections for the child PID
-and a compact list of all established connections during the HTTPS transfer.
-It does not enable or modify EStats.
+The child prints its socket endpoints and holds the HTTPS socket open.
+While it is open, this script checks both NetTrack's parsed rows and
+Windows netstat -ano output for the child's PID. No EStats calls are made.
 """
 
 import json
@@ -38,15 +38,34 @@ conn = http.client.HTTPSConnection(
 try:
     conn.connect()
     print("CONNECTED", flush=True)
-    time.sleep(10)
+    print("SOCKET_LOCAL", conn.sock.getsockname(), flush=True)
+    print("SOCKET_REMOTE", conn.sock.getpeername(), flush=True)
+    time.sleep(12)
     conn.request("GET", "/__down?" + urlencode({"bytes": size}))
     response = conn.getresponse()
     payload = response.read()
     print("RESULT", response.status, len(payload), flush=True)
-    time.sleep(10)
+    time.sleep(12)
 finally:
     conn.close()
 """
+
+
+def netstat_rows(pid):
+    result = subprocess.run(
+        ["netstat", "-ano", "-p", "tcp"],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        check=False,
+    )
+    matches = []
+    target = str(pid)
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) >= 5 and fields[-1] == target:
+            matches.append(line.strip())
+    return matches, result.returncode, result.stderr.strip()
 
 
 def main():
@@ -59,42 +78,49 @@ def main():
     )
 
     print("=" * 68)
-    print("NETTRACK - WINDOWS TCP OWNER-PID DIAGNOSTIC")
+    print("NETTRACK - WINDOWS TCP OWNER-PID CROSS-CHECK")
     print("=" * 68)
     print(f"Child PID: {child.pid}")
-    print("The child holds an HTTPS connection open for inspection.")
+    print("Waiting for the child's HTTPS socket and comparing TCP tables.")
 
     snapshots = 0
-    child_rows_seen = 0
+    parsed_rows_seen = 0
+    netstat_rows_seen = 0
+    printed_netstat = False
+
     try:
         while child.poll() is None:
             snapshots += 1
+
             try:
                 ipv4 = monitor.get_connections()
                 ipv6 = monitor.get_ipv6_connections()
+                parsed = [
+                    row for row in ipv4 + ipv6 if row["pid"] == child.pid
+                ]
             except Exception as exc:
-                print(f"TCP TABLE ERROR: {type(exc).__name__}: {exc}")
-                time.sleep(1)
-                continue
+                parsed = []
+                print(f"NETTRACK TABLE ERROR: {type(exc).__name__}: {exc}")
 
-            all_rows = ipv4 + ipv6
-            matches = [row for row in all_rows if row["pid"] == child.pid]
-
-            if matches:
-                child_rows_seen += len(matches)
-                print(f"\nSNAPSHOT {snapshots}: CHILD CONNECTIONS")
-                for row in matches:
+            if parsed:
+                parsed_rows_seen += len(parsed)
+                print(f"\nSNAPSHOT {snapshots}: NETTRACK MATCHES")
+                for row in parsed:
                     print(json.dumps(row, sort_keys=True))
-            elif snapshots % 2 == 0:
+
+            raw_matches, code, error = netstat_rows(child.pid)
+            if raw_matches:
+                netstat_rows_seen += len(raw_matches)
+                if not printed_netstat:
+                    print("\nWINDOWS NETSTAT MATCHES:")
+                    for line in raw_matches:
+                        print(line)
+                    printed_netstat = True
+            elif snapshots in (2, 6, 10, 14, 18, 22):
                 print(
-                    f"Snapshot {snapshots}: no ESTABLISHED row for child PID; "
-                    f"IPv4 rows={len(ipv4)}, IPv6 rows={len(ipv6)}"
+                    f"Snapshot {snapshots}: no netstat row for PID "
+                    f"{child.pid}; netstat exit={code}"
                 )
-
-            if snapshots == 1:
-                print("\nSAMPLE OF OTHER ESTABLISHED CONNECTIONS:")
-                for row in all_rows[:12]:
-                    print(json.dumps(row, sort_keys=True))
 
             time.sleep(1)
 
@@ -107,10 +133,16 @@ def main():
 
         print("\nSUMMARY:")
         print(f"Snapshots taken: {snapshots}")
-        print(f"Child connection rows observed: {child_rows_seen}")
-        print("If rows for the child appear here, compare their PID/family")
-        print("with the earlier EStats diagnostic. If none appear, investigate")
-        print("the TCP table enumeration/structure parsing next.")
+        print(f"NetTrack parser matches: {parsed_rows_seen}")
+        print(f"netstat matches: {netstat_rows_seen}")
+        if netstat_rows_seen and not parsed_rows_seen:
+            print("RESULT: Windows netstat sees the child PID, but NetTrack's")
+            print("TCP table parser does not. Investigate table parsing/filters.")
+        elif not netstat_rows_seen and not parsed_rows_seen:
+            print("RESULT: Neither view found the child PID; inspect the printed")
+            print("socket endpoints and verify the child process owns the socket.")
+        elif parsed_rows_seen:
+            print("RESULT: NetTrack's parser found the child connection.")
     finally:
         if child.poll() is None:
             child.kill()
