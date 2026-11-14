@@ -1,10 +1,12 @@
 """Measure pywintrace event parsing and shutdown behavior.
 
 Run from an elevated PowerShell:
-    python tools/diagnose_etw_shutdown.py
+    python tools/diagnose_etw_shutdown.py --duration 20
+    python tools/diagnose_etw_shutdown.py --duration 90
 
 This diagnostic does not write application usage to the database.
 """
+import argparse
 import os
 import sys
 import threading
@@ -17,7 +19,49 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from services.etw_app_monitor import ETWAppMonitor
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=20,
+        help="ETW capture duration in seconds (default: 20).",
+    )
+    parser.add_argument(
+        "--shutdown-timeout",
+        type=float,
+        default=120,
+        help="Maximum consumer shutdown wait in seconds (default: 120).",
+    )
+    args = parser.parse_args()
+    if args.duration <= 0 or args.shutdown_timeout <= 0:
+        parser.error("duration and shutdown-timeout must be greater than zero")
+    return args
+
+
+def metric_snapshot(metrics, lock):
+    with lock:
+        result = dict(metrics)
+        result["by_event_id"] = dict(metrics["by_event_id"])
+    return result
+
+
+def print_metrics(title, values):
+    average_ms = (
+        values["total_seconds"] / values["events"] * 1000
+        if values["events"] else 0
+    )
+    print(f"\n{title}")
+    print(f"Events parsed:             {values['events']}")
+    print(f"Events currently parsing:  {values['active']}")
+    print(f"Total parse/callback time: {values['total_seconds']:.3f}s")
+    print(f"Average per event:         {average_ms:.3f}ms")
+    print(f"Maximum per event:         {values['max_seconds'] * 1000:.3f}ms")
+    print(f"Event IDs:                 {values['by_event_id']}")
+
+
 def main():
+    args = parse_args()
     if os.name != "nt":
         raise SystemExit("This diagnostic requires Windows.")
 
@@ -80,34 +124,27 @@ def main():
 
         print("NETTRACK - ETW PARSING AND SHUTDOWN DIAGNOSTIC")
         print(f"Process PID: {os.getpid()}")
+        print(f"Capture duration: {args.duration:.1f}s")
+        print(f"Shutdown timeout: {args.shutdown_timeout:.1f}s")
         print(f"Consumer thread: {consumer.process_thread.name}")
-        print("Generate normal Chrome traffic during the 20-second capture.")
+        print(
+            f"Generate normal Chrome traffic during the "
+            f"{args.duration:.0f}-second capture."
+        )
         try:
-            time.sleep(20)
+            time.sleep(args.duration)
         except KeyboardInterrupt:
             print("Capture interrupted; proceeding to shutdown.")
 
-        with metrics_lock:
-            captured = dict(metrics)
-            captured["by_event_id"] = dict(metrics["by_event_id"])
-
-        average_ms = (
-            captured["total_seconds"] / captured["events"] * 1000
-            if captured["events"] else 0
-        )
-        print("\nEVENT PARSING METRICS")
-        print(f"Events parsed:             {captured['events']}")
-        print(f"Events currently parsing:  {captured['active']}")
-        print(f"Total parse/callback time: {captured['total_seconds']:.3f}s")
-        print(f"Average per event:         {average_ms:.3f}ms")
-        print(f"Maximum per event:         {captured['max_seconds'] * 1000:.3f}ms")
-        print(f"Event IDs:                 {captured['by_event_id']}")
+        before_stop = metric_snapshot(metrics, metrics_lock)
+        print_metrics("EVENT PARSING METRICS BEFORE SHUTDOWN", before_stop)
 
         print("\nSTOP STAGE 1: stopping ETW provider...", flush=True)
-        started = time.monotonic()
+        provider_started = time.monotonic()
         session.provider.stop()
         print(
-            f"Provider stop returned in {time.monotonic() - started:.3f}s.",
+            f"Provider stop returned in "
+            f"{time.monotonic() - provider_started:.3f}s.",
             flush=True,
         )
         print(
@@ -120,11 +157,11 @@ def main():
         close_trace = etw_impl.et.CloseTrace
 
         def tracked_close_trace(handle):
-            started_close = time.monotonic()
+            close_started = time.monotonic()
             result = close_trace(handle)
             print(
                 f"CloseTrace returned {result} in "
-                f"{time.monotonic() - started_close:.3f}s",
+                f"{time.monotonic() - close_started:.3f}s",
                 flush=True,
             )
             return result
@@ -143,13 +180,25 @@ def main():
             name="NetTrackConsumerStopDiagnostic",
             daemon=True,
         )
+        shutdown_started = time.monotonic()
         shutdown.start()
-        shutdown.join(30)
+        shutdown.join(args.shutdown_timeout)
+        shutdown_elapsed = time.monotonic() - shutdown_started
 
+        after_stop = metric_snapshot(metrics, metrics_lock)
+        print(f"Consumer stop wait: {shutdown_elapsed:.3f}s")
         print(f"Consumer stop helper alive: {shutdown.is_alive()}")
-        print(f"ETW ProcessTrace thread alive: {consumer.process_thread.is_alive()}")
+        print(
+            f"ETW ProcessTrace thread alive: "
+            f"{consumer.process_thread.is_alive()}"
+        )
         print(f"Consumer end_capture set: {consumer.end_capture.is_set()}")
         print(f"Consumer stop error: {result['error']}")
+        print_metrics("EVENT PARSING METRICS AFTER SHUTDOWN WAIT", after_stop)
+        print(
+            "Events processed during shutdown wait: "
+            f"{after_stop['events'] - before_stop['events']}"
+        )
 
         frames = sys._current_frames()
         print("\nCONSUMER THREAD STACK:")
@@ -159,13 +208,15 @@ def main():
         else:
             print("No Python frame found; consumer thread has exited.")
 
-        print("\nRESULT: parsing metrics and shutdown state captured.")
+        if shutdown.is_alive():
+            print(
+                "\nRESULT: consumer did not finish within the configured "
+                "shutdown timeout."
+            )
+        else:
+            print("\nRESULT: consumer shutdown completed.")
     finally:
         etw_impl.EventConsumer._processEvent = original_process_event
-        if "etw_impl" in locals():
-            # The provider is stopped above. Restore the library function even
-            # if the diagnostic is interrupted or reports an error.
-            pass
 
 
 if __name__ == "__main__":
