@@ -151,8 +151,8 @@ class NetTrackWindow(QMainWindow):
         self.worker = None
         self.history_period = "7 days"
         self.setWindowTitle("NetTrack | Network Usage Monitor")
-        self.setMinimumSize(900, 620)
-        self.resize(1280, 800)
+        self.setMinimumSize(820, 560)
+        self.resize(1180, 680)
         self._build_ui()
         self._apply_style()
 
@@ -241,15 +241,23 @@ class NetTrackWindow(QMainWindow):
         content_layout.addLayout(topbar)
 
         self.pages = QStackedWidget()
-        self.pages.addWidget(self._build_overview_page())
-        self.pages.addWidget(self._build_applications_page())
-        self.pages.addWidget(self._build_history_page())
+        self.pages.addWidget(self._scroll_page(self._build_overview_page()))
+        self.pages.addWidget(self._scroll_page(self._build_applications_page()))
+        self.pages.addWidget(self._scroll_page(self._build_history_page()))
         content_layout.addWidget(self.pages, 1)
 
         shell_layout.addWidget(sidebar)
         shell_layout.addWidget(content_shell, 1)
         self.setCentralWidget(shell)
         self.show_page(0)
+
+    def _scroll_page(self, content):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(content)
+        return scroll
 
     def _build_overview_page(self):
         page = QWidget()
