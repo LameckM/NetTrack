@@ -106,10 +106,16 @@ class ETWAppMonitor:
         """Extract PID/size from raw records, then update the thread-safe counter."""
         try:
             _callback_event_id, record = event
-            event_id = int(
-                record.contents.EventHeader.EventDescriptor.Id
-            )
-            payload = self._raw_decoder.decode(record, event_id)
+            if isinstance(record, dict):
+                # Keep direct dictionary callbacks available for unit tests
+                # and callers that already supply decoded event payloads.
+                event_id = _callback_event_id
+                payload = record
+            else:
+                event_id = int(
+                    record.contents.EventHeader.EventDescriptor.Id
+                )
+                payload = self._raw_decoder.decode(record, event_id)
             if payload is not None:
                 self._counter.record(event_id, payload)
         except Exception as exc:
