@@ -177,74 +177,80 @@ def enable_collection(row):
     return result == 0
 
 
-previous = {}
-enabled = set()
 
-print("Monitoring all established IPv4 TCP connections.")
-print("Duration: 30 seconds\n")
-
-for cycle in range(15):
-    usage = defaultdict(lambda: [0, 0])
-
-    try:
-        connections = get_tcp_connections()
-    except OSError as error:
-        print("TCP table error:", error)
-        break
-
-    for connection in connections:
-        if connection.state != 5 or connection.pid == 0:
-            continue
-
-        key = connection_key(connection)
-        row = make_api_row(connection)
-
-        if key not in enabled:
-            if not enable_collection(row):
+def main():
+    previous = {}
+    enabled = set()
+    
+    print("Monitoring all established IPv4 TCP connections.")
+    print("Duration: 30 seconds\n")
+    
+    for cycle in range(15):
+        usage = defaultdict(lambda: [0, 0])
+    
+        try:
+            connections = get_tcp_connections()
+        except OSError as error:
+            print("TCP table error:", error)
+            break
+    
+        for connection in connections:
+            if connection.state != 5 or connection.pid == 0:
                 continue
-            enabled.add(key)
+    
+            key = connection_key(connection)
+            row = make_api_row(connection)
+    
+            if key not in enabled:
+                if not enable_collection(row):
+                    continue
+                enabled.add(key)
+    
+            counters = read_counters(row)
+    
+            if counters is None:
+                continue
+    
+            sent, received = counters
+    
+            if key in previous:
+                old_sent, old_received = previous[key]
+    
+                sent_delta = max(0, sent - old_sent)
+                received_delta = max(0, received - old_received)
+    
+                try:
+                    process_name = psutil.Process(
+                        connection.pid
+                    ).name()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    process_name = "Unknown"
+    
+                usage[process_name][0] += sent_delta
+                usage[process_name][1] += received_delta
+    
+            previous[key] = (sent, received)
+    
+        print(f"\n--- Sample {cycle + 1}/15 ---")
+    
+        if not usage:
+            print("No new traffic detected.")
+    
+        for name, totals in sorted(
+            usage.items(),
+            key=lambda item: sum(item[1]),
+            reverse=True,
+        ):
+            print(
+                f"{name:25} "
+                f"Sent: {totals[0]:>10,} B | "
+                f"Received: {totals[1]:>10,} B"
+            )
+    
+        time.sleep(2)
+    
+    print("\nMonitoring complete.")
+    
 
-        counters = read_counters(row)
-
-        if counters is None:
-            continue
-
-        sent, received = counters
-
-        if key in previous:
-            old_sent, old_received = previous[key]
-
-            sent_delta = max(0, sent - old_sent)
-            received_delta = max(0, received - old_received)
-
-            try:
-                process_name = psutil.Process(
-                    connection.pid
-                ).name()
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                process_name = "Unknown"
-
-            usage[process_name][0] += sent_delta
-            usage[process_name][1] += received_delta
-
-        previous[key] = (sent, received)
-
-    print(f"\n--- Sample {cycle + 1}/15 ---")
-
-    if not usage:
-        print("No new traffic detected.")
-
-    for name, totals in sorted(
-        usage.items(),
-        key=lambda item: sum(item[1]),
-        reverse=True,
-    ):
-        print(
-            f"{name:25} "
-            f"Sent: {totals[0]:>10,} B | "
-            f"Received: {totals[1]:>10,} B"
-        )
-
-    time.sleep(2)
-
-print("\nMonitoring complete.")
+if __name__ == "__main__":
+    main()
