@@ -41,6 +41,9 @@ expected_response = response_size
 
 if mode == "persistent":
     with socket.create_connection((host, port), timeout=10) as client:
+        # Let NetTrack observe the established socket and enable EStats
+        # before the test payload is transferred.
+        time.sleep(3)
         client.sendall(payload)
         received = 0
         while received < expected_response:
