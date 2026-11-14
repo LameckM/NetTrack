@@ -1,0 +1,27 @@
+{
+  "name": "nettrack-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "NetTrack desktop interface",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite",
+    "desktop": "concurrently -k \"npm:dev\" \"npm:electron\"",
+    "electron": "wait-on http://localhost:5173 && electron .",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "recharts": "^2.15.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "electron": "^33.2.1",
+    "vite": "^6.0.5",
+    "wait-on": "^8.0.1"
+  }
+}
