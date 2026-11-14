@@ -17,8 +17,8 @@ function createWindow() {
     }
   });
 
-  if (process.env.VITE_DEV_SERVER_URL) {
-    window.loadURL(process.env.VITE_DEV_SERVER_URL);
+  if (!app.isPackaged) {
+    window.loadURL("http://127.0.0.1:5173");
   } else {
     window.loadFile(path.join(__dirname, "../dist/index.html"));
   }
