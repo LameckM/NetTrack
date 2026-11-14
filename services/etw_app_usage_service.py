@@ -39,7 +39,15 @@ class ETWAppUsageService:
         except KeyboardInterrupt:
             print("\nApplication monitoring stopped.")
         finally:
-            self.monitor.stop()
+            try:
+                stopped = self.monitor.stop()
+                if stopped is False:
+                    print(
+                        "WARNING: ETW shutdown exceeded the timeout; "
+                        "continuing to display saved totals."
+                    )
+            except Exception as exc:
+                print(f"WARNING: ETW shutdown reported an error: {exc}")
 
         print("\nSaved application totals:")
         for app in self.database.get_app_totals():
