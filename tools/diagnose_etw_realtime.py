@@ -1,7 +1,7 @@
 """Real-time ETW prototype for short-lived application traffic.
 
 Run in elevated PowerShell:
-    python -m pip install pywintrace==0.3.0
+    python -m pip install https://github.com/fireeye/pywintrace/releases/download/v0.3.0/pywintrace-0.3.0-py3-none-any.whl
     python tools/diagnose_etw_realtime.py
 
 This isolated diagnostic sends about 48 KiB of HTTPS payload to
@@ -113,7 +113,7 @@ def main():
     except ImportError as exc:
         raise SystemExit(
             "Missing optional dependency. Run: "
-            "python -m pip install pywintrace==0.3.0"
+            "python -m pip install https://github.com/fireeye/pywintrace/releases/download/v0.3.0/pywintrace-0.3.0-py3-none-any.whl"
         ) from exc
 
     target_pid = os.getpid()
