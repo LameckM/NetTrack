@@ -1,11 +1,11 @@
-"""Cross-check a live HTTPS socket by local port, PID, netstat, and psutil.
+"""Cross-check a live HTTPS socket by local port and identify its owning process.
 
 Run:
     python tools/diagnose_tcp_owner_table.py
 
-The child prints its local socket port before holding the HTTPS connection open.
-The parent then checks that exact port in netstat, psutil, and NetTrack's
-owner-PID TCP table parser. No EStats calls are made.
+The child reports its PID and socket endpoints. The parent checks that exact
+local port in netstat, psutil, and NetTrack, then prints process metadata for
+the PID Windows assigns to the socket. No EStats calls are made.
 """
 
 import ast
@@ -27,6 +27,7 @@ SIZE = 32 * 1024
 
 CHILD_CODE = r"""
 import http.client
+import os
 import ssl
 import sys
 import time
@@ -39,15 +40,15 @@ conn = http.client.HTTPSConnection(
 )
 try:
     conn.connect()
-    print("CONNECTED", flush=True)
+    print("CHILD_PID", os.getpid(), flush=True)
     print("SOCKET_LOCAL", repr(conn.sock.getsockname()), flush=True)
     print("SOCKET_REMOTE", repr(conn.sock.getpeername()), flush=True)
-    time.sleep(15)
+    time.sleep(3)
     conn.request("GET", "/__down?" + urlencode({"bytes": size}))
     response = conn.getresponse()
     payload = response.read()
     print("RESULT", response.status, len(payload), flush=True)
-    time.sleep(8)
+    time.sleep(4)
 finally:
     conn.close()
 """
@@ -70,6 +71,34 @@ def read_netstat(local_port):
     return matches, result.stdout, result.stderr, result.returncode
 
 
+def process_details(pid):
+    try:
+        process = psutil.Process(pid)
+        try:
+            cmdline = process.cmdline()
+        except (psutil.AccessDenied, psutil.ZombieProcess):
+            cmdline = ["<unavailable>"]
+        try:
+            parent = process.parent()
+            parent_info = (
+                {"pid": parent.pid, "name": parent.name()}
+                if parent else None
+            )
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            parent_info = None
+
+        return {
+            "pid": pid,
+            "name": process.name(),
+            "exe": process.exe(),
+            "cmdline": cmdline,
+            "parent": parent_info,
+            "create_time": process.create_time(),
+        }
+    except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
+        return {"pid": pid, "error": f"{type(exc).__name__}: {exc}"}
+
+
 def main():
     monitor = TCPStatsMonitor()
     child = subprocess.Popen(
@@ -81,14 +110,13 @@ def main():
     )
 
     print("=" * 68)
-    print("NETTRACK - TCP SOCKET OWNERSHIP CROSS-CHECK")
+    print("NETTRACK - TCP SOCKET OWNER PROCESS DIAGNOSTIC")
     print("=" * 68)
-    print(f"Child PID: {child.pid}")
+    print(f"Popen child PID: {child.pid}")
 
     local_port = None
     child_output = []
     try:
-        # Wait for the child to establish its socket and print the local port.
         deadline = time.time() + 20
         while time.time() < deadline and child.poll() is None:
             line = child.stdout.readline()
@@ -107,73 +135,62 @@ def main():
             return
 
         print(f"\nChecking exact local TCP port: {local_port}")
-        netstat_matches = []
-        psutil_matches = []
-        parsed_matches = []
+        raw_matches, raw_output, raw_error, code = read_netstat(local_port)
 
-        for sample in range(1, 11):
-            raw_matches, raw_output, raw_error, code = read_netstat(local_port)
-            if raw_matches:
-                netstat_matches = raw_matches
+        try:
+            psutil_matches = [
+                item for item in psutil.net_connections(kind="tcp")
+                if item.laddr and item.laddr.port == local_port
+            ]
+        except Exception as exc:
+            psutil_matches = []
+            print(f"PSUTIL ERROR: {type(exc).__name__}: {exc}")
 
-            try:
-                for item in psutil.net_connections(kind="tcp"):
-                    if (
-                        item.laddr
-                        and item.laddr.port == local_port
-                    ):
-                        psutil_matches.append({
-                            "pid": item.pid,
-                            "status": item.status,
-                            "local": f"{item.laddr.ip}:{item.laddr.port}",
-                            "remote": (
-                                f"{item.raddr.ip}:{item.raddr.port}"
-                                if item.raddr else None
-                            ),
-                        })
-            except Exception as exc:
-                print(f"PSUTIL ERROR: {type(exc).__name__}: {exc}")
-
-            try:
-                rows = monitor.get_connections() + monitor.get_ipv6_connections()
-                parsed_matches = [
-                    row for row in rows
-                    if row["local_port"] == local_port
-                ]
-            except Exception as exc:
-                print(f"NETTRACK TABLE ERROR: {type(exc).__name__}: {exc}")
-
-            print(
-                f"Sample {sample}: netstat={len(netstat_matches)}, "
-                f"psutil={len(psutil_matches)}, "
-                f"NetTrack={len(parsed_matches)}"
+        try:
+            parsed_rows = (
+                monitor.get_connections() + monitor.get_ipv6_connections()
             )
-            if netstat_matches or psutil_matches or parsed_matches:
-                break
-            time.sleep(1)
+            nettrack_matches = [
+                row for row in parsed_rows if row["local_port"] == local_port
+            ]
+        except Exception as exc:
+            nettrack_matches = []
+            print(f"NETTRACK TABLE ERROR: {type(exc).__name__}: {exc}")
 
-        print("\nNETSTAT ROWS FOR LOCAL PORT:")
-        print("\n".join(netstat_matches) if netstat_matches else "(none)")
+        print("\nNETSTAT:")
+        print("\n".join(raw_matches) if raw_matches else "(none)")
 
-        print("\nPSUTIL ROWS FOR LOCAL PORT:")
-        print(
-            json.dumps(psutil_matches, indent=2)
-            if psutil_matches else "(none)"
-        )
+        print("\nPSUTIL:")
+        print(json.dumps([
+            {
+                "pid": item.pid,
+                "status": item.status,
+                "local": f"{item.laddr.ip}:{item.laddr.port}",
+                "remote": (
+                    f"{item.raddr.ip}:{item.raddr.port}" if item.raddr else None
+                ),
+            }
+            for item in psutil_matches
+        ], indent=2))
 
-        print("\nNETTRACK ROWS FOR LOCAL PORT:")
-        print(
-            json.dumps(parsed_matches, indent=2)
-            if parsed_matches else "(none)"
-        )
+        print("\nNETTRACK:")
+        print(json.dumps(nettrack_matches, indent=2))
 
-        print("\nRAW NETSTAT ESTABLISHED TCP SAMPLE:")
-        established = [
-            line.strip()
-            for line in raw_output.splitlines()
-            if "ESTABLISHED" in line.upper()
-        ]
-        print("\n".join(established[:15]) if established else "(none)")
+        owner_pids = {
+            item.pid for item in psutil_matches if item.pid is not None
+        }
+        for line in raw_matches:
+            fields = line.split()
+            if fields and fields[-1].isdigit():
+                owner_pids.add(int(fields[-1]))
+        for row in nettrack_matches:
+            owner_pids.add(row["pid"])
+
+        print("\nPROCESS DETAILS:")
+        print("Popen child:", json.dumps(process_details(child.pid), indent=2))
+        for pid in sorted(owner_pids):
+            print(f"Socket owner {pid}:")
+            print(json.dumps(process_details(pid), indent=2))
 
         print("\nCHILD OUTPUT:")
         for line in child_output:
@@ -182,6 +199,7 @@ def main():
             line = line.strip()
             if line:
                 print(line)
+
     finally:
         if child.poll() is None:
             child.kill()
