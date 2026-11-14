@@ -37,11 +37,13 @@ time.sleep(0.5)
 
 connections = monitor.get_ipv6_connections()
 
+# Select the client-side established connection. Its remote port is
+# the local test server's listening port, so sent/received counters have
+# an unambiguous direction.
 connection = next(
     (
         item for item in connections
-        if item["local_port"] == port
-        or item["remote_port"] == port
+        if item["remote_port"] == port
     ),
     None
 )
@@ -69,15 +71,15 @@ try:
     second = monitor.read_ipv6_counters(connection)
     print("Updated counters:", second)
 
-    print(
-        "Bytes sent increase:",
-        second["bytes_sent"] > first["bytes_sent"]
-    )
+    sent_increased = second["bytes_sent"] > first["bytes_sent"]
+    received_increased = second["bytes_received"] > first["bytes_received"]
 
-    print(
-        "Bytes received increase:",
-        second["bytes_received"] > first["bytes_received"]
-    )
+    print("Bytes sent increase:", sent_increased)
+    print("Bytes received increase:", received_increased)
+
+    assert sent_increased, "IPv6 bytes_sent counter did not increase"
+    assert received_increased, "IPv6 bytes_received counter did not increase"
+    print("PASS: IPv6 TCP counters increased in both directions")
 
 finally:
     client.close()
