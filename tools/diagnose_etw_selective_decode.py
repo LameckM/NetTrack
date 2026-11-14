@@ -14,6 +14,8 @@ import threading
 import time
 from collections import Counter, defaultdict
 
+import psutil
+
 SEND_EVENT_IDS = {10, 26, 42, 58}
 RECEIVE_EVENT_IDS = {11, 27, 43, 59}
 FILTER_EVENT_IDS = sorted(SEND_EVENT_IDS | RECEIVE_EVENT_IDS)
@@ -136,6 +138,29 @@ class SelectiveEventDecoder:
         return pid, size
 
 
+def print_process_totals(rows, heading):
+    print(heading)
+    ranked = sorted(
+        rows.items(),
+        key=lambda item: item[1]["sent"] + item[1]["received"],
+        reverse=True,
+    )
+    if not ranked:
+        print("  No process totals captured.")
+        return
+    for pid, values in ranked[:10]:
+        try:
+            name = psutil.Process(pid).name()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            name = "<process exited or inaccessible>"
+        print(
+            f"  {name} (PID {pid}) | "
+            f"Downloaded: {values['received']:,} bytes | "
+            f"Uploaded: {values['sent']:,} bytes | "
+            f"Events: {values['events']:,}"
+        )
+
+
 def main():
     args = parse_args()
     if os.name != "nt":
@@ -219,6 +244,7 @@ def main():
     print(f"Decoded events: {before_total}")
     print(f"Event IDs: {before_counts}")
     print(f"Processes attributed: {len(before_totals)}")
+    print_process_totals(before_totals, "Top processes before shutdown:")
     own = before_totals.get(os.getpid(), {})
     print(
         "This diagnostic process: "
@@ -263,6 +289,7 @@ def main():
     print(f"Events decoded during shutdown: {after_total - before_total}")
     print(f"Event IDs overall: {after_counts}")
     print(f"Processes attributed overall: {len(after_totals)}")
+    print_process_totals(after_totals, "Top processes overall:")
     own = after_totals.get(os.getpid(), {})
     print(
         "This diagnostic process overall: "
