@@ -99,7 +99,7 @@ export default function App() {
     <main className="main-area">
       <header className="topbar"><div className="breadcrumb">NetTrack <span>/</span> {active.charAt(0)+active.slice(1).toLowerCase()}</div><div className="top-actions"><label className="search-box"><Search size={15}/><input placeholder="Search applications..." value={search} onChange={e=>setSearch(e.target.value)}/><kbd>⌘ K</kbd></label><button className="top-icon"><Bell size={17}/><i/></button><div className="profile"><div className="profile-avatar">N</div><span>My device</span><ChevronDown size={14}/></div></div></header>
       <div className="page-content">
-        <div className="welcome-row"><div><div className="eyebrow">SATURDAY, NOVEMBER 14, 2026</div><h1>{pageTitle}<span className="wave">✦</span></h1><p>{active==="OVERVIEW"?"Here's what's happening with your network today.":active==="APPLICATIONS"?"Understand which apps are using your bandwidth.":"Explore your network usage patterns over time."}</p></div><div className="connection-pill"><span className="pulse-dot"/><div><strong>Connected</strong><small>Ethernet · Secure connection</small></div><ChevronDown size={15}/></div></div>
+        <div className="welcome-row"><div><div className="eyebrow">SATURDAY, NOVEMBER 14, 2026</div><h1>{pageTitle}<span className="wave">✦</span></h1><p>{active==="OVERVIEW"?"Here's what's happening with your network today.":active==="APPLICATIONS"?"Understand which apps are using your bandwidth.":"Explore your network usage patterns over time."}</p></div><div className="preview-pill"><Activity size={14}/> UI PREVIEW · SAMPLE VALUES</div></div>
 
         {active==="OVERVIEW"&&<>
           <div className="metrics-grid">
