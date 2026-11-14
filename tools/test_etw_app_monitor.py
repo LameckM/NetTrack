@@ -1,5 +1,6 @@
 """Unit tests for ETW-backed application traffic accounting."""
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from services.etw_app_monitor import ETWAppMonitor
@@ -42,6 +43,20 @@ class FakeSession:
         self.stopped = True
 
 
+class FakeRawDecoder:
+    def __init__(self):
+        self.decoded = []
+
+    def decode(self, record, event_id):
+        self.decoded.append((record, event_id))
+        return {"PID": record.pid, "size": record.size}
+
+
+class FakeProviderParameters:
+    def get(self):
+        return "FILTERED_PROVIDER_PARAMETERS"
+
+
 class FakeETWModule:
     GUID = FakeGuid
     ProviderInfo = FakeProviderInfo
@@ -64,9 +79,14 @@ class ETWAppMonitorTests(unittest.TestCase):
         self.process_patch.start()
         self.addCleanup(self.process_patch.stop)
         self.etw = FakeETWModule()
+        self.raw_decoder = FakeRawDecoder()
+        self.provider_parameters = FakeProviderParameters()
         self.monitor = ETWAppMonitor(
             session_name="NetTrackUnitTest",
             etw_module=self.etw,
+            raw_decoder=self.raw_decoder,
+            raw_callback_data_flag="RAW_MODE",
+            provider_parameters=self.provider_parameters,
         )
 
     def start_monitor(self):
@@ -81,6 +101,13 @@ class ETWAppMonitorTests(unittest.TestCase):
         self.assertEqual(
             self.etw.session.kwargs["session_name"],
             "NetTrackUnitTest",
+        )
+        self.assertEqual(
+            self.etw.session.kwargs["callback_data_flag"], "RAW_MODE"
+        )
+        self.assertEqual(
+            self.etw.session.kwargs["providers"][0].kwargs["params"],
+            "FILTERED_PROVIDER_PARAMETERS",
         )
         self.monitor.stop()
         self.assertTrue(self.etw.session.stopped)
@@ -100,6 +127,24 @@ class ETWAppMonitorTests(unittest.TestCase):
         self.assertEqual(usage[0]["bytes_sent"], 120)
         self.assertEqual(usage[0]["bytes_received"], 80)
         self.assertEqual(usage[0]["total_bytes"], 200)
+
+    def test_raw_callback_decodes_payload_pid_and_size(self):
+        self.start_monitor()
+        callback = self.etw.session.kwargs["event_callback"]
+        record = SimpleNamespace(
+            pid=7654,
+            size=321,
+            contents=SimpleNamespace(
+                EventHeader=SimpleNamespace(
+                    EventDescriptor=SimpleNamespace(Id=10)
+                )
+            ),
+        )
+        callback((0, record))
+        usage = self.monitor.collect_once()
+        self.assertEqual(usage[0]["pid"], 7654)
+        self.assertEqual(usage[0]["bytes_sent"], 321)
+        self.assertEqual(self.raw_decoder.decoded, [(record, 10)])
 
     def test_second_sample_reports_only_new_event_bytes(self):
         self.start_monitor()
