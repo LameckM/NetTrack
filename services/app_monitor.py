@@ -1,4 +1,3 @@
-
 import psutil
 
 from services.tcp_stats import TCPStatsMonitor
@@ -9,64 +8,73 @@ class AppMonitor:
         self.tcp_monitor = TCPStatsMonitor()
         self.previous = {}
 
+    def _get_all_connections(self):
+        """Return active IPv4 and IPv6 TCP connections."""
+        connections = self.tcp_monitor.get_connections()
+        connections.extend(self.tcp_monitor.get_ipv6_connections())
+        return connections
+
+    def _enable_collection(self, connection):
+        if connection.get("family") == "IPv6":
+            return self.tcp_monitor.enable_ipv6_collection(connection)
+        return self.tcp_monitor.enable_collection(connection)
+
+    def _read_counters(self, connection):
+        if connection.get("family") == "IPv6":
+            return self.tcp_monitor.read_ipv6_counters(connection)
+        return self.tcp_monitor.read_counters(connection)
+
     def get_usage(self):
         usage = {}
         current_keys = set()
 
-        connections = self.tcp_monitor.get_connections()
+        connections = self._get_all_connections()
 
         for connection in connections:
             pid = connection["pid"]
 
             try:
                 process = psutil.Process(pid)
-
                 application = process.name()
                 process_created = process.create_time()
+                family = connection.get("family", "IPv4")
 
-                # Identify each connection using its process instance
-                # and network endpoints.
+                # Include address family and IPv6 scope IDs so otherwise
+                # identical IPv4/IPv6 endpoints cannot collide.
                 key = (
+                    family,
                     pid,
                     process_created,
                     connection["local_ip"],
+                    connection.get("local_scope_id", 0),
                     connection["local_port"],
                     connection["remote_ip"],
+                    connection.get("remote_scope_id", 0),
                     connection["remote_port"],
                 )
-
                 current_keys.add(key)
 
                 if key not in self.previous:
-                    self.tcp_monitor.enable_collection(connection)
-
-                    counters = self.tcp_monitor.read_counters(connection)
-
-                    # Establish baseline for new connections.
-                    self.previous[key] = counters
+                    self._enable_collection(connection)
+                    self.previous[key] = self._read_counters(connection)
                     continue
 
-                counters = self.tcp_monitor.read_counters(connection)
+                counters = self._read_counters(connection)
                 previous = self.previous[key]
 
                 sent = max(
                     0,
                     counters["bytes_sent"] - previous["bytes_sent"]
                 )
-
                 received = max(
                     0,
                     counters["bytes_received"] - previous["bytes_received"]
                 )
-
                 self.previous[key] = counters
 
-                # Keep separate records for individual process instances.
-                process_key = (
-                    application,
-                    pid,
-                    process_created
-                )
+                # Aggregate all connections belonging to the same process
+                # instance, regardless of whether they use IPv4 or IPv6.
+                process_key = (application, pid, process_created)
 
                 if process_key not in usage:
                     usage[process_key] = {
