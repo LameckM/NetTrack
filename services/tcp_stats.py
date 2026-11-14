@@ -453,8 +453,47 @@ class TCPStatsMonitor:
         }
 
     def get_ipv6_row(self, connection):
-        # Build an independent MIB_TCP6ROW structure from the connection
-        # snapshot. Returning a row backed by a local GetTcp6Table buffer
-        # would leave callers with a pointer to memory that can be released
-        # as soon as this method returns.
-        return self._make_ipv6_row(connection)
+        # SetPerTcp6ConnectionEStats requires a row from GetTcp6Table.
+        # Do not construct it from the owner-PID table snapshot: retrieve
+        # the canonical MIB_TCP6ROW currently registered by Windows.
+        size = wintypes.DWORD(0)
+
+        result = get_tcp6_table(None, ctypes.byref(size), False)
+        if result != 122:
+            raise OSError(result, "Could not obtain IPv6 TCP table size")
+
+        buffer = ctypes.create_string_buffer(size.value)
+        result = get_tcp6_table(buffer, ctypes.byref(size), False)
+        if result != 0:
+            raise OSError(result, "Could not retrieve IPv6 TCP table")
+
+        count = ctypes.cast(
+            buffer, ctypes.POINTER(wintypes.DWORD)
+        ).contents.value
+        rows_type = TCP6Row * count
+        rows = ctypes.cast(
+            ctypes.addressof(buffer) + ctypes.sizeof(wintypes.DWORD),
+            ctypes.POINTER(rows_type),
+        ).contents
+
+        wanted_local = socket.inet_pton(socket.AF_INET6, connection["local_ip"])
+        wanted_remote = socket.inet_pton(socket.AF_INET6, connection["remote_ip"])
+
+        for row in rows:
+            if (
+                bytes(row.local_addr) == wanted_local
+                and bytes(row.remote_addr) == wanted_remote
+                and row.local_scope_id == connection["local_scope_id"]
+                and row.remote_scope_id == connection["remote_scope_id"]
+                and socket.ntohs(row.local_port & 0xFFFF) == connection["local_port"]
+                and socket.ntohs(row.remote_port & 0xFFFF) == connection["remote_port"]
+                and row.state == connection["state"]
+            ):
+                # ctypes returns a structure by value; this is an owned copy,
+                # not a pointer into the temporary table buffer.
+                return TCP6Row.from_buffer_copy(bytes(row))
+
+        raise RuntimeError(
+            "IPv6 connection from GetExtendedTcpTable was not found "
+            "in GetTcp6Table; the connection may have closed or changed"
+        )
