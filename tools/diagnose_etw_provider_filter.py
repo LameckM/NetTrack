@@ -57,6 +57,23 @@ def main():
         etw_impl.ep.EVENT_FILTER_TYPE_EVENT_ID,
     )
     provider_parameters = etw_impl.ProviderParameters(0, [descriptor])
+    # pywintrace's ProviderParameters keeps a pointer to its local descriptor
+    # buffer but does not retain that buffer. Keep a live buffer and repoint
+    # the structure so Windows never receives a dangling pointer.
+    descriptor_buffer = (ct.c_char * ct.sizeof(
+        etw_impl.ep.EVENT_FILTER_DESCRIPTOR
+    ))()
+    ct.memmove(
+        ct.addressof(descriptor_buffer),
+        ct.byref(descriptor),
+        ct.sizeof(etw_impl.ep.EVENT_FILTER_DESCRIPTOR),
+    )
+    provider_parameters._descriptor_buffer = descriptor_buffer
+    provider_parameters._props.contents.EnableFilterDesc = ct.cast(
+        ct.pointer(descriptor_buffer),
+        ct.POINTER(etw_impl.ep.EVENT_FILTER_DESCRIPTOR),
+    )
+    provider_parameters._props.contents.FilterDescCount = 1
 
     event_counts = Counter()
     callback_errors = []
