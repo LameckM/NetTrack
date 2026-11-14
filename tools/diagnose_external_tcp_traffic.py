@@ -1,17 +1,15 @@
-"""Measure NetTrack against a small, known external TCP transfer.
-
-Uses Cloudflare's public speed-test endpoints:
-  GET  https://speed.cloudflare.com/__down?bytes=N
-  POST https://speed.cloudflare.com/__up
+"""Measure AppMonitor against a known external HTTPS transfer.
 
 Run from the repository root:
     python tools/diagnose_external_tcp_traffic.py
 
-The test transfers 128 KiB down and 128 KiB up (plus protocol overhead).
-It keeps one HTTPS/TCP connection open so AppMonitor has time to discover it
-and enable per-connection statistics before transferring the test payload.
+Important: On Windows, sys.executable may be a venv launcher whose PID differs
+from the actual Python process. The child therefore reports os.getpid(), and
+the monitor filters by that actual socket-owning PID.
 """
 
+import json
+import os
 import subprocess
 import sys
 import time
@@ -23,15 +21,15 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from services.app_monitor import AppMonitor
 
-
 HOST = "speed.cloudflare.com"
 TRANSFER_BYTES = 128 * 1024
-POLL_INTERVAL_SECONDS = 2
-CHILD_HOLD_SECONDS = 5
+POLL_INTERVAL_SECONDS = 1
+CHILD_HOLD_SECONDS = 8
 
 CHILD_CODE = r"""
 import http.client
 import json
+import os
 import ssl
 import sys
 import time
@@ -42,15 +40,17 @@ size = int(sys.argv[2])
 hold_seconds = float(sys.argv[3])
 
 connection = http.client.HTTPSConnection(
-    host,
-    timeout=30,
-    context=ssl.create_default_context(),
+    host, timeout=30, context=ssl.create_default_context()
 )
 
 try:
-    # Establish TCP + TLS first. The parent monitor gets several polling
-    # opportunities to discover this connection before the payload transfer.
     connection.connect()
+    # Report the PID of the process that actually owns connection.sock.
+    print("CHILD_PID", os.getpid(), flush=True)
+    print("SOCKET_LOCAL", repr(connection.sock.getsockname()), flush=True)
+    print("SOCKET_REMOTE", repr(connection.sock.getpeername()), flush=True)
+
+    # Keep the connection established so the parent can enable EStats first.
     time.sleep(6)
 
     connection.request("GET", "/__down?" + urlencode({"bytes": size}))
@@ -58,15 +58,11 @@ try:
     downloaded = download_response.read()
     download_status = download_response.status
     if download_status != 200:
-        raise RuntimeError(
-            f"Download endpoint returned HTTP {download_status}"
-        )
+        raise RuntimeError(f"Download endpoint returned HTTP {download_status}")
 
     upload_payload = b"N" * size
     connection.request(
-        "POST",
-        "/__up",
-        body=upload_payload,
+        "POST", "/__up", body=upload_payload,
         headers={
             "Content-Type": "application/octet-stream",
             "Content-Length": str(len(upload_payload)),
@@ -83,10 +79,8 @@ try:
         "upload_status": upload_status,
         "downloaded_bytes": len(downloaded),
         "uploaded_bytes": len(upload_payload),
-    }))
+    }), flush=True)
 
-    # Leave the same TCP connection established while the parent takes
-    # additional samples after the transfer.
     time.sleep(hold_seconds)
 finally:
     connection.close()
@@ -99,55 +93,82 @@ def main():
     print("=" * 68)
     print(f"Remote host: {HOST}")
     print(f"Expected payload: {TRANSFER_BYTES:,} bytes down and up")
-    print(f"Sampling interval: {POLL_INTERVAL_SECONDS} seconds")
-    print("Estimated payload usage: about 256 KiB, plus network overhead.")
+    print(f"Sampling interval: {POLL_INTERVAL_SECONDS} second(s)")
     print("This test uses one persistent HTTPS connection.")
 
     monitor = AppMonitor()
-    monitor.get_usage()  # Clear/establish the monitor's initial baseline.
+    monitor.get_usage()
 
     process = subprocess.Popen(
         [
-            sys.executable,
-            "-c",
-            CHILD_CODE,
-            HOST,
-            str(TRANSFER_BYTES),
-            str(CHILD_HOLD_SECONDS),
+            sys.executable, "-u", "-c", CHILD_CODE,
+            HOST, str(TRANSFER_BYTES), str(CHILD_HOLD_SECONDS),
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        bufsize=1,
     )
 
     observed_sent = 0
     observed_received = 0
+    child_pid = None
+    child_lines = []
 
     try:
+        # Wait for the actual socket-owning Python process to identify itself.
+        deadline = time.time() + 40
+        while time.time() < deadline and process.poll() is None:
+            line = process.stdout.readline()
+            if not line:
+                continue
+            line = line.strip()
+            child_lines.append(line)
+            print(f"CHILD: {line}")
+            if line.startswith("CHILD_PID "):
+                child_pid = int(line.split(maxsplit=1)[1])
+                break
+
+        if child_pid is None:
+            raise RuntimeError(
+                "The traffic process did not report its actual PID. "
+                "Child output: " + " | ".join(child_lines)
+            )
+
+        print(f"Launcher PID: {process.pid}")
+        print(f"Actual socket-owning PID: {child_pid}")
+
         while process.poll() is None:
             time.sleep(POLL_INTERVAL_SECONDS)
             for row in monitor.get_usage():
-                if row["pid"] == process.pid:
+                if row["pid"] == child_pid:
                     observed_sent += row["bytes_sent"]
                     observed_received += row["bytes_received"]
 
-        stdout, stderr = process.communicate(timeout=10)
+        remaining_stdout, stderr = process.communicate(timeout=10)
+        child_lines.extend(
+            line.strip() for line in remaining_stdout.splitlines() if line.strip()
+        )
 
-        # Take one final sample while the child may still have a live socket.
+        # A final sample catches any delta reported before the socket closes.
         for row in monitor.get_usage():
-            if row["pid"] == process.pid:
+            if row["pid"] == child_pid:
                 observed_sent += row["bytes_sent"]
                 observed_received += row["bytes_received"]
 
         if process.returncode != 0:
             raise RuntimeError(
                 "External traffic generator failed. "
-                f"Details: {stderr.strip() or stdout.strip()}"
+                f"Details: {stderr.strip() or ' | '.join(child_lines)}"
             )
 
-        import json
+        result_lines = [
+            line for line in child_lines if line.startswith("{")
+        ]
+        if not result_lines:
+            raise RuntimeError("Traffic child did not return transfer results.")
+        result = json.loads(result_lines[-1])
 
-        result = json.loads(stdout.strip().splitlines()[-1])
         print("\nREMOTE TRANSFER")
         print("----------------")
         print(f"Download HTTP status: {result['download_status']}")
@@ -157,17 +178,16 @@ def main():
 
         print("\nNETTRACK OBSERVATION")
         print("--------------------")
-        print(f"Target process PID:   {process.pid}")
+        print(f"Launcher PID:         {process.pid}")
+        print(f"Target process PID:   {child_pid}")
         print(f"Observed upload:      {observed_sent:,} bytes")
         print(f"Observed download:    {observed_received:,} bytes")
-        print("\nNote: TCP counters include protocol overhead, so observed totals")
-        print("may be higher than the application payload sizes.")
+        print("\nTCP counters may include protocol overhead.")
         if observed_sent or observed_received:
             print("RESULT: NetTrack observed traffic on the external TCP connection.")
         else:
-            print("RESULT: NetTrack observed zero traffic; investigate EStats")
-            print("activation/readout on an external connection before changing")
-            print("the short-lived-connection handling.")
+            print("RESULT: NetTrack still observed zero traffic for the actual")
+            print("socket-owning PID. Investigate EStats activation/readout next.")
     finally:
         if process.poll() is None:
             process.kill()
