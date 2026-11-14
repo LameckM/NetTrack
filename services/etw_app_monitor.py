@@ -31,7 +31,10 @@ def is_admin():
 class ETWAppMonitor:
     """Collect per-process network event bytes from a real-time ETW session."""
 
-    def __init__(self, session_name=None, etw_module=None):
+    def __init__(self, session_name=None, etw_module=None, stop_timeout=10.0):
+        if stop_timeout <= 0:
+            raise ValueError("ETW stop timeout must be greater than zero.")
+        self.stop_timeout = stop_timeout
         self.session_name = session_name or f"NetTrackAppUsage_{os.getpid()}"
         self._etw_module = etw_module
         self._counter = ETWTrafficCounter()
@@ -162,5 +165,27 @@ class ETWAppMonitor:
         self._session = None
         self._started = False
         if session is not None:
-            session.stop()
+            # pywintrace's consumer.stop() performs an unbounded thread.join().
+            # Run shutdown in a daemon helper so Ctrl+C cannot leave the main
+            # service blocked forever while waiting for ProcessTrace to exit.
+            errors = []
+
+            def stop_session():
+                try:
+                    session.stop()
+                except Exception as exc:  # propagate on the caller thread
+                    errors.append(exc)
+
+            shutdown_thread = threading.Thread(
+                target=stop_session,
+                name="NetTrackETWShutdown",
+                daemon=True,
+            )
+            shutdown_thread.start()
+            shutdown_thread.join(self.stop_timeout)
+            if shutdown_thread.is_alive():
+                return False
+            if errors:
+                raise errors[0]
+        return True
 
