@@ -32,16 +32,18 @@ class ApplicationMonitorWorker(QThread):
         self._running = True
 
     def run(self):
-        from services.etw_app_monitor import ETWAppMonitor
-
-        monitor = ETWAppMonitor()
+        monitor = None
         try:
+            from services.etw_app_monitor import ETWAppMonitor
+
+            monitor = ETWAppMonitor()
+            database = DatabaseManager()
             monitor.start()
             self.status_changed.emit("Application monitoring active")
             while self._running:
                 applications = monitor.collect_once()
                 if applications:
-                    DatabaseManager().save_app_usage(applications)
+                    database.save_app_usage(applications)
                 # Wait in short increments so shutdown remains responsive.
                 for _ in range(int(self.interval * 10)):
                     if not self._running:
@@ -50,10 +52,11 @@ class ApplicationMonitorWorker(QThread):
         except Exception as exc:
             self.failed.emit(str(exc))
         finally:
-            try:
-                monitor.stop()
-            except Exception as exc:
-                self.failed.emit(f"ETW shutdown: {exc}")
+            if monitor is not None:
+                try:
+                    monitor.stop()
+                except Exception as exc:
+                    self.failed.emit(f"ETW shutdown: {exc}")
             self.status_changed.emit("Application monitoring stopped")
 
     def stop(self):
