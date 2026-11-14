@@ -1,13 +1,14 @@
-"""Compare NetTrack's TCP table parser with Windows netstat for a live child socket.
+"""Cross-check a live HTTPS socket by local port, PID, netstat, and psutil.
 
 Run:
     python tools/diagnose_tcp_owner_table.py
 
-The child prints its socket endpoints and holds the HTTPS socket open.
-While it is open, this script checks both NetTrack's parsed rows and
-Windows netstat -ano output for the child's PID. No EStats calls are made.
+The child prints its local socket port before holding the HTTPS connection open.
+The parent then checks that exact port in netstat, psutil, and NetTrack's
+owner-PID TCP table parser. No EStats calls are made.
 """
 
+import ast
 import json
 import subprocess
 import sys
@@ -18,6 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+import psutil
 from services.tcp_stats import TCPStatsMonitor
 
 HOST = "speed.cloudflare.com"
@@ -38,20 +40,20 @@ conn = http.client.HTTPSConnection(
 try:
     conn.connect()
     print("CONNECTED", flush=True)
-    print("SOCKET_LOCAL", conn.sock.getsockname(), flush=True)
-    print("SOCKET_REMOTE", conn.sock.getpeername(), flush=True)
-    time.sleep(12)
+    print("SOCKET_LOCAL", repr(conn.sock.getsockname()), flush=True)
+    print("SOCKET_REMOTE", repr(conn.sock.getpeername()), flush=True)
+    time.sleep(15)
     conn.request("GET", "/__down?" + urlencode({"bytes": size}))
     response = conn.getresponse()
     payload = response.read()
     print("RESULT", response.status, len(payload), flush=True)
-    time.sleep(12)
+    time.sleep(8)
 finally:
     conn.close()
 """
 
 
-def netstat_rows(pid):
+def read_netstat(local_port):
     result = subprocess.run(
         ["netstat", "-ano", "-p", "tcp"],
         capture_output=True,
@@ -59,92 +61,136 @@ def netstat_rows(pid):
         errors="replace",
         check=False,
     )
-    matches = []
-    target = str(pid)
-    for line in result.stdout.splitlines():
-        fields = line.split()
-        if len(fields) >= 5 and fields[-1] == target:
-            matches.append(line.strip())
-    return matches, result.returncode, result.stderr.strip()
+    needle = f":{local_port}"
+    matches = [
+        line.strip()
+        for line in result.stdout.splitlines()
+        if needle in line and "TCP" in line.upper()
+    ]
+    return matches, result.stdout, result.stderr, result.returncode
 
 
 def main():
     monitor = TCPStatsMonitor()
     child = subprocess.Popen(
-        [sys.executable, "-c", CHILD_CODE, HOST, str(SIZE)],
+        [sys.executable, "-u", "-c", CHILD_CODE, HOST, str(SIZE)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        bufsize=1,
     )
 
     print("=" * 68)
-    print("NETTRACK - WINDOWS TCP OWNER-PID CROSS-CHECK")
+    print("NETTRACK - TCP SOCKET OWNERSHIP CROSS-CHECK")
     print("=" * 68)
     print(f"Child PID: {child.pid}")
-    print("Waiting for the child's HTTPS socket and comparing TCP tables.")
 
-    snapshots = 0
-    parsed_rows_seen = 0
-    netstat_rows_seen = 0
-    printed_netstat = False
-
+    local_port = None
+    child_output = []
     try:
-        while child.poll() is None:
-            snapshots += 1
+        # Wait for the child to establish its socket and print the local port.
+        deadline = time.time() + 20
+        while time.time() < deadline and child.poll() is None:
+            line = child.stdout.readline()
+            if not line:
+                continue
+            line = line.strip()
+            child_output.append(line)
+            print(f"CHILD: {line}")
+            if line.startswith("SOCKET_LOCAL "):
+                endpoint = ast.literal_eval(line[len("SOCKET_LOCAL "):])
+                local_port = endpoint[1]
+                break
+
+        if local_port is None:
+            print("ERROR: Child did not report a local socket port.")
+            return
+
+        print(f"\nChecking exact local TCP port: {local_port}")
+        netstat_matches = []
+        psutil_matches = []
+        parsed_matches = []
+
+        for sample in range(1, 11):
+            raw_matches, raw_output, raw_error, code = read_netstat(local_port)
+            if raw_matches:
+                netstat_matches = raw_matches
 
             try:
-                ipv4 = monitor.get_connections()
-                ipv6 = monitor.get_ipv6_connections()
-                parsed = [
-                    row for row in ipv4 + ipv6 if row["pid"] == child.pid
+                for item in psutil.net_connections(kind="tcp"):
+                    if (
+                        item.laddr
+                        and item.laddr.port == local_port
+                    ):
+                        psutil_matches.append({
+                            "pid": item.pid,
+                            "status": item.status,
+                            "local": f"{item.laddr.ip}:{item.laddr.port}",
+                            "remote": (
+                                f"{item.raddr.ip}:{item.raddr.port}"
+                                if item.raddr else None
+                            ),
+                        })
+            except Exception as exc:
+                print(f"PSUTIL ERROR: {type(exc).__name__}: {exc}")
+
+            try:
+                rows = monitor.get_connections() + monitor.get_ipv6_connections()
+                parsed_matches = [
+                    row for row in rows
+                    if row["local_port"] == local_port
                 ]
             except Exception as exc:
-                parsed = []
                 print(f"NETTRACK TABLE ERROR: {type(exc).__name__}: {exc}")
 
-            if parsed:
-                parsed_rows_seen += len(parsed)
-                print(f"\nSNAPSHOT {snapshots}: NETTRACK MATCHES")
-                for row in parsed:
-                    print(json.dumps(row, sort_keys=True))
-
-            raw_matches, code, error = netstat_rows(child.pid)
-            if raw_matches:
-                netstat_rows_seen += len(raw_matches)
-                if not printed_netstat:
-                    print("\nWINDOWS NETSTAT MATCHES:")
-                    for line in raw_matches:
-                        print(line)
-                    printed_netstat = True
-            elif snapshots in (2, 6, 10, 14, 18, 22):
-                print(
-                    f"Snapshot {snapshots}: no netstat row for PID "
-                    f"{child.pid}; netstat exit={code}"
-                )
-
+            print(
+                f"Sample {sample}: netstat={len(netstat_matches)}, "
+                f"psutil={len(psutil_matches)}, "
+                f"NetTrack={len(parsed_matches)}"
+            )
+            if netstat_matches or psutil_matches or parsed_matches:
+                break
             time.sleep(1)
 
-        stdout, stderr = child.communicate(timeout=10)
-        print("\nCHILD OUTPUT:")
-        print(stdout.strip() or "(no stdout)")
-        if stderr.strip():
-            print("\nCHILD STDERR:")
-            print(stderr.strip())
+        print("\nNETSTAT ROWS FOR LOCAL PORT:")
+        print("\n".join(netstat_matches) if netstat_matches else "(none)")
 
-        print("\nSUMMARY:")
-        print(f"Snapshots taken: {snapshots}")
-        print(f"NetTrack parser matches: {parsed_rows_seen}")
-        print(f"netstat matches: {netstat_rows_seen}")
-        if netstat_rows_seen and not parsed_rows_seen:
-            print("RESULT: Windows netstat sees the child PID, but NetTrack's")
-            print("TCP table parser does not. Investigate table parsing/filters.")
-        elif not netstat_rows_seen and not parsed_rows_seen:
-            print("RESULT: Neither view found the child PID; inspect the printed")
-            print("socket endpoints and verify the child process owns the socket.")
-        elif parsed_rows_seen:
-            print("RESULT: NetTrack's parser found the child connection.")
+        print("\nPSUTIL ROWS FOR LOCAL PORT:")
+        print(
+            json.dumps(psutil_matches, indent=2)
+            if psutil_matches else "(none)"
+        )
+
+        print("\nNETTRACK ROWS FOR LOCAL PORT:")
+        print(
+            json.dumps(parsed_matches, indent=2)
+            if parsed_matches else "(none)"
+        )
+
+        print("\nRAW NETSTAT ESTABLISHED TCP SAMPLE:")
+        established = [
+            line.strip()
+            for line in raw_output.splitlines()
+            if "ESTABLISHED" in line.upper()
+        ]
+        print("\n".join(established[:15]) if established else "(none)")
+
+        print("\nCHILD OUTPUT:")
+        for line in child_output:
+            print(line)
+        for line in child.stdout:
+            line = line.strip()
+            if line:
+                print(line)
     finally:
         if child.poll() is None:
+            child.kill()
+        try:
+            _, stderr = child.communicate(timeout=10)
+            if stderr.strip():
+                print("\nCHILD STDERR:")
+                print(stderr.strip())
+        except subprocess.TimeoutExpired:
             child.kill()
             child.wait()
 
