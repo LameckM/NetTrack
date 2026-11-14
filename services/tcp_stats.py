@@ -453,65 +453,8 @@ class TCPStatsMonitor:
         }
 
     def get_ipv6_row(self, connection):
-        size = wintypes.DWORD(0)
-
-        result = get_tcp6_table(
-            None,
-            ctypes.byref(size),
-            False,
-        )
-
-        if result != 122:
-            raise OSError(result, "Could not obtain IPv6 table size")
-
-        buffer = ctypes.create_string_buffer(size.value)
-
-        result = get_tcp6_table(
-            buffer,
-            ctypes.byref(size),
-            False,
-        )
-
-        if result != 0:
-            raise OSError(result, "Could not retrieve IPv6 table")
-
-        count = ctypes.cast(
-            buffer,
-            ctypes.POINTER(wintypes.DWORD)
-        ).contents.value
-
-        address = ctypes.addressof(buffer) + 4
-
-        rows_type = TCP6Row * count
-
-        rows = ctypes.cast(
-            address,
-            ctypes.POINTER(rows_type)
-        ).contents
-
-        for row in rows:
-            local_ip = socket.inet_ntop(
-                socket.AF_INET6,
-                bytes(row.local_addr)
-            )
-
-            remote_ip = socket.inet_ntop(
-                socket.AF_INET6,
-                bytes(row.remote_addr)
-            )
-
-            local_port = socket.ntohs(row.local_port & 0xFFFF)
-            remote_port = socket.ntohs(row.remote_port & 0xFFFF)
-
-            if (
-                local_ip == connection["local_ip"]
-                and remote_ip == connection["remote_ip"]
-                and local_port == connection["local_port"]
-                and remote_port == connection["remote_port"]
-                and row.state == connection["state"]
-            ):
-                return row
-
-        raise RuntimeError(
-            "IPv6 connection was not found in GetTcp6Table"
-        )
+        # Build an independent MIB_TCP6ROW structure from the connection
+        # snapshot. Returning a row backed by a local GetTcp6Table buffer
+        # would leave callers with a pointer to memory that can be released
+        # as soon as this method returns.
+        return self._make_ipv6_row(connection)
