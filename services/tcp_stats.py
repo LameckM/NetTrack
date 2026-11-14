@@ -46,14 +46,17 @@ class TCP6RowPID(ctypes.Structure):
 
 
 class TCP6Row(ctypes.Structure):
+    # MIB_TCP6ROW field order from the Windows SDK:
+    # State, LocalAddr, dwLocalScopeId, dwLocalPort,
+    # RemoteAddr, dwRemoteScopeId, dwRemotePort.
     _fields_ = [
+        ("state", wintypes.DWORD),
         ("local_addr", ctypes.c_ubyte * 16),
         ("local_scope_id", wintypes.DWORD),
         ("local_port", wintypes.DWORD),
         ("remote_addr", ctypes.c_ubyte * 16),
         ("remote_scope_id", wintypes.DWORD),
         ("remote_port", wintypes.DWORD),
-        ("state", wintypes.DWORD),
     ]
 
 class RW(ctypes.Structure):
