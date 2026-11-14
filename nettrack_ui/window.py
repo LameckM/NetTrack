@@ -111,8 +111,8 @@ class NetTrackWindow(QMainWindow):
     def _build_ui(self):
         root = QWidget()
         root_layout = QVBoxLayout(root)
-        root_layout.setContentsMargins(28, 22, 28, 22)
-        root_layout.setSpacing(18)
+        root_layout.setContentsMargins(22, 16, 22, 16)
+        root_layout.setSpacing(12)
 
         header = QHBoxLayout()
         brand = QVBoxLayout()
@@ -162,7 +162,7 @@ class NetTrackWindow(QMainWindow):
         self.adapter_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.adapter_table.verticalHeader().setVisible(False)
         self.adapter_table.horizontalHeader().setStretchLastSection(True)
-        self.adapter_table.setMinimumHeight(190)
+        self.adapter_table.setMinimumHeight(110)
         root_layout.addWidget(self.adapter_table)
 
         app_header = QHBoxLayout()
@@ -183,7 +183,7 @@ class NetTrackWindow(QMainWindow):
         self.app_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.app_table.verticalHeader().setVisible(False)
         self.app_table.horizontalHeader().setStretchLastSection(True)
-        self.app_table.setMinimumHeight(190)
+        self.app_table.setMinimumHeight(110)
         root_layout.addWidget(self.app_table)
 
         footer = QLabel(
