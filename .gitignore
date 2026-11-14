@@ -1,0 +1,26 @@
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Environment variables
+.env
+
+# IDE
+.vscode/
+
+# Database files (keep if you intend to version your database)
+# *.db
+
+# Build files
+build/
+dist/
+*.egg-info/
+
+# Logs
+*.log
